@@ -26,29 +26,24 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Setup Flutter
+      - name: Setup Flutter (Latest Stable)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.29.0'
           channel: 'stable'
 
-      - name: Prepare Project
+      - name: Prepare Project & Patch Constraints
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           echo '${{ github.event.inputs.payload }}' > payload.json
-          cat payload.json
 
           ASSET_URL=$(jq -r '.zipAssetUrl // .url // empty' payload.json)
 
           if [ -z "$ASSET_URL" ]; then
-            echo "::error::Tidak ada zipAssetUrl atau url di payload. Isi payload:"
-            cat payload.json
+            echo "::error::Tidak ada zipAssetUrl atau url di payload."
             exit 1
           fi
-
-          echo "Downloading project source from: $ASSET_URL"
 
           rm -rf project project.zip
           mkdir -p project
@@ -67,14 +62,31 @@ jobs:
 
           PUBSPEC=$(find project -maxdepth 5 -type f -name pubspec.yaml | head -n 1)
           if [ -z "$PUBSPEC" ]; then
-            echo "::error::pubspec.yaml tidak ditemukan di dalam ZIP. Pastikan ini project Flutter yang valid."
-            find project -maxdepth 3
+            echo "::error::pubspec.yaml tidak ditemukan di dalam ZIP."
             exit 1
           fi
 
           PROJECT_ROOT=$(dirname "$PUBSPEC")
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
-          echo "Detected Flutter project root: $PROJECT_ROOT"
+
+          # 1. Hapus pubspec.lock agar tidak mengunci versi lama dari lokal user
+          rm -f "$PROJECT_ROOT/pubspec.lock"
+
+          # 2. Patch SDK Constraint di pubspec.yaml
+          python3 -c "
+          import re
+          pubspec_path = '$PUBSPEC'
+          with open(pubspec_path, 'r') as f:
+              content = f.read()
+          
+          # Ubah batasan SDK ke range luas
+          new_content = re.sub(r'sdk:\s*[\"'].*?[\"']|sdk:\s*[^\n]+', 'sdk: \">=2.12.0 <4.0.0\"', content)
+          
+          with open(pubspec_path, 'w') as f:
+              f.write(new_content)
+          "
+          echo "Updated pubspec.yaml environment:"
+          grep -A 3 "environment:" "$PUBSPEC" || true
 
       - name: Build APK
         run: |
@@ -90,11 +102,9 @@ jobs:
           APK_PATH=$(find "$PROJECT_ROOT" -type f -name "app-release.apk" -path "*/flutter-apk/*" | head -n 1)
           if [ -z "$APK_PATH" ]; then
             echo "::error::app-release.apk tidak ditemukan setelah build."
-            find "$PROJECT_ROOT/build" -maxdepth 5 2>/dev/null || true
             exit 1
           fi
           echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
-          echo "Found APK at: $APK_PATH"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
